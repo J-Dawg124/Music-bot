@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Spotify Album Tracker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-gray-100 p-6">
+
+<div class="max-w-5xl mx-auto">
+
+  <h1 class="text-3xl font-bold mb-4">🎵 Spotify Album Tracker</h1>
+
+  <!-- LOGIN -->
+  <button onclick="loginSpotify()"
+    class="bg-green-500 text-black px-6 py-3 rounded-full mb-6">
+    Sign in with Spotify
+  </button>
+
+  <!-- SEARCH -->
+  <div class="bg-white p-4 rounded shadow mb-6">
+    <input id="search" placeholder="Search albums..." class="border p-2 w-64">
+    <button onclick="searchSpotify()" class="bg-green-500 text-white px-4 py-2 ml-2">
+      Search
+    </button>
+  </div>
+
+  <!-- RESULTS -->
+  <div id="results" class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6"></div>
+
+  <!-- STATS -->
+  <div class="bg-white p-4 rounded shadow mb-6">
+    <h2 class="font-bold mb-2">📊 Stats</h2>
+    <div id="stats" class="grid grid-cols-3 text-center"></div>
+  </div>
+
+  <!-- YOUR ALBUMS -->
+  <div id="albums" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+
+</div>
+
+<script>
+
+const CLIENT_ID = "YOUR_SPOTIFY_CLIENT_ID";
+const REDIRECT_URI = "https://music-bot-ecru.vercel.app/";
+
+let token = null;
+let albums = JSON.parse(localStorage.getItem("albums") || "[]");
+
+/* ---------------- LOGIN (PKCE) ---------------- */
+
+function generateRandomString(length) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  return Array.from({length}, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+}
+
+async function sha256(verifier) {
+  const data = new TextEncoder().encode(verifier);
+  return crypto.subtle.digest("SHA-256", data);
+}
+
+function base64urlencode(buffer) {
+  return btoa(String.fromCharCode(...new Uint8Array(buffer)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+async function loginSpotify() {
+  const verifier = generateRandomString(64);
+  localStorage.setItem("verifier", verifier);
+
+  const challenge = base64urlencode(await sha256(verifier));
+
+  const params = new URLSearchParams({
+    client_id: CLIENT_ID,
+    response_type: "code",
+    redirect_uri: REDIRECT_URI,
+    code_challenge_method: "S256",
+    code_challenge: challenge
+  });
+
+  window.location = `https://accounts.spotify.com/authorize?${params}`;
+}
+
+/* ---------------- HANDLE LOGIN REDIRECT ---------------- */
+
+async function handleRedirect() {
+  const urlParams = new URLSearchParams(window.location.search);
+  const code = urlParams.get("code");
+
+  if (!code) return;
+
+  const verifier = localStorage.getItem("verifier");
+
+  const body = new URLSearchParams({
+    client_id: CLIENT_ID,
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: REDIRECT_URI,
+    code_verifier: verifier
+  });
+
+  const res = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body
+  });
+
+  const data = await res.json();
+  token = data.access_token;
+
+  // clean URL (IMPORTANT for Vercel)
+  window.history.replaceState({}, document.title, "/");
+}
+
+handleRedirect();
+
+/* ---------------- SEARCH ---------------- */
+
+async function searchSpotify() {
+  if (!token) return alert("Login first");
+
+  const q = document.getElementById("search").value;
+
+  const res = await fetch(
+    `https://api.spotify.com/v1/search?q=${encodeURIComponent(q)}&type=album`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+
+  const data = await res.json();
+  renderResults(data.albums.items);
+}
+
+/* ---------------- RESULTS ---------------- */
+
+function renderResults(items) {
+  const el = document.getElementById("results");
+  el.innerHTML = "";
+
+  items.forEach(a => {
+    el.innerHTML += `
+      <div class="bg-white p-2 rounded shadow">
+        <img src="${a.images[0]?.url}" class="w-full rounded"/>
+        <div class="text-sm font-bold">${a.name}</div>
+        <div class="text-xs text-gray-500">${a.artists[0].name}</div>
+        <button onclick='addAlbum("${a.id}", "${a.name}", "${a.artists[0].name}", "${a.images[0]?.url}")'
+          class="bg-blue-500 text-white w-full mt-2 rounded">
+          Add
+        </button>
+      </div>
+    `;
+  });
+}
+
+/* ---------------- ALBUMS ---------------- */
+
+function addAlbum(id, title, artist, image) {
+  albums.push({
+    id, title, artist, image,
+    listened: false,
+    rating: ""
+  });
+
+  save();
+}
+
+function toggle(i) {
+  albums[i].listened = !albums[i].listened;
+  save();
+}
+
+function save() {
+  localStorage.setItem("albums", JSON.stringify(albums));
+  render();
+}
+
+/* ---------------- STATS ---------------- */
+
+function renderStats() {
+  const listened = albums.filter(a => a.listened);
+
+  const ratings = listened
+    .map(a => parseFloat(a.rating))
+    .filter(r => !isNaN(r));
+
+  const avg = ratings.length
+    ? (ratings.reduce((a,b)=>a+b,0)/ratings.length).toFixed(2)
+    : "N/A";
+
+  const artistCount = {};
+  listened.forEach(a => {
+    artistCount[a.artist] = (artistCount[a.artist] || 0) + 1;
+  });
+
+  const top = Object.entries(artistCount)
+    .sort((a,b)=>b[1]-a[1])
+    .slice(0,3)
+    .map(a => a[0])
+    .join("<br>") || "N/A";
+
+  document.getElementById("stats").innerHTML = `
+    <div><b>${albums.length}</b><br>Total</div>
+    <div><b>${avg}</b><br>Avg Rating</div>
+    <div><b>${top}</b><br>Top Artists</div>
+  `;
+}
+
+/* ---------------- RENDER ---------------- */
+
+function render() {
+  const el = document.getElementById("albums");
+  el.innerHTML = "";
+
+  albums.forEach((a,i) => {
+    el.innerHTML += `
+      <div class="bg-white p-4 rounded shadow">
+        <img src="${a.image}" class="w-24 mb-2"/>
+        <div class="font-bold">${a.title}</div>
+        <div class="text-sm text-gray-600">${a.artist}</div>
+
+        <button onclick="toggle(${i})"
+          class="mt-2 px-2 py-1 rounded ${a.listened ? 'bg-green-400' : 'bg-gray-300'}">
+          ${a.listened ? "Listened" : "Not"}
+        </button>
+
+        ${a.listened ? `
+          <input class="border w-full mt-2"
+            placeholder="Rating"
+            value="${a.rating}"
+            onchange="albums[${i}].rating=this.value;save();" />
+        ` : ""}
+      </div>
+    `;
+  });
+
+  renderStats();
+}
+
+render();
+
+</script>
+</body>
+</html>
